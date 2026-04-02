@@ -22,5 +22,23 @@ func now()string{return time.Now().UTC().Format(time.RFC3339)}
 func(d *DB)Create(e *TimeEntry)error{e.ID=genID();e.CreatedAt=now();_,err:=d.db.Exec(`INSERT INTO time_entries(id,description,project,task,duration,start_time,end_time,billable,tags,created_at)VALUES(?,?,?,?,?,?,?,?,?,?)`,e.ID,e.Description,e.Project,e.Task,e.Duration,e.StartTime,e.EndTime,e.Billable,e.Tags,e.CreatedAt);return err}
 func(d *DB)Get(id string)*TimeEntry{var e TimeEntry;if d.db.QueryRow(`SELECT id,description,project,task,duration,start_time,end_time,billable,tags,created_at FROM time_entries WHERE id=?`,id).Scan(&e.ID,&e.Description,&e.Project,&e.Task,&e.Duration,&e.StartTime,&e.EndTime,&e.Billable,&e.Tags,&e.CreatedAt)!=nil{return nil};return &e}
 func(d *DB)List()[]TimeEntry{rows,_:=d.db.Query(`SELECT id,description,project,task,duration,start_time,end_time,billable,tags,created_at FROM time_entries ORDER BY created_at DESC`);if rows==nil{return nil};defer rows.Close();var o []TimeEntry;for rows.Next(){var e TimeEntry;rows.Scan(&e.ID,&e.Description,&e.Project,&e.Task,&e.Duration,&e.StartTime,&e.EndTime,&e.Billable,&e.Tags,&e.CreatedAt);o=append(o,e)};return o}
+func(d *DB)Update(e *TimeEntry)error{_,err:=d.db.Exec(`UPDATE time_entries SET description=?,project=?,task=?,duration=?,start_time=?,end_time=?,billable=?,tags=? WHERE id=?`,e.Description,e.Project,e.Task,e.Duration,e.StartTime,e.EndTime,e.Billable,e.Tags,e.ID);return err}
 func(d *DB)Delete(id string)error{_,err:=d.db.Exec(`DELETE FROM time_entries WHERE id=?`,id);return err}
 func(d *DB)Count()int{var n int;d.db.QueryRow(`SELECT COUNT(*) FROM time_entries`).Scan(&n);return n}
+
+func(d *DB)Search(q string, filters map[string]string)[]TimeEntry{
+    where:="1=1"
+    args:=[]any{}
+    if q!=""{
+        where+=" AND (description LIKE ?)"
+        args=append(args,"%"+q+"%");
+    }
+    rows,_:=d.db.Query(`SELECT id,description,project,task,duration,start_time,end_time,billable,tags,created_at FROM time_entries WHERE `+where+` ORDER BY created_at DESC`,args...)
+    if rows==nil{return nil};defer rows.Close()
+    var o []TimeEntry;for rows.Next(){var e TimeEntry;rows.Scan(&e.ID,&e.Description,&e.Project,&e.Task,&e.Duration,&e.StartTime,&e.EndTime,&e.Billable,&e.Tags,&e.CreatedAt);o=append(o,e)};return o
+}
+
+func(d *DB)Stats()map[string]any{
+    m:=map[string]any{"total":d.Count()}
+    return m
+}
