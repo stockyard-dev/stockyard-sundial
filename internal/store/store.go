@@ -1,14 +1,23 @@
 package store
-import("database/sql";"fmt";"os";"path/filepath";"time";_ "modernc.org/sqlite")
-type DB struct{*sql.DB}
-type Project struct{ID int64 `json:"id"`;Name string `json:"name"`;Client string `json:"client"`;HourlyRateCents int64 `json:"hourly_rate_cents"`;TotalSeconds int64 `json:"total_seconds"`;CreatedAt time.Time `json:"created_at"`}
-type Entry struct{ID int64 `json:"id"`;ProjectID int64 `json:"project_id"`;Description string `json:"description"`;StartedAt string `json:"started_at"`;StoppedAt string `json:"stopped_at"`;DurationSeconds int64 `json:"duration_seconds"`;Running bool `json:"running"`;CreatedAt time.Time `json:"created_at"`}
-func Open(d string)(*DB,error){os.MkdirAll(d,0755);dsn:=filepath.Join(d,"sundial.db")+"?_journal_mode=WAL&_busy_timeout=5000";db,err:=sql.Open("sqlite",dsn);if err!=nil{return nil,fmt.Errorf("open: %w",err)};db.SetMaxOpenConns(1);migrate(db);return &DB{db},nil}
-func migrate(db *sql.DB){db.Exec(`CREATE TABLE IF NOT EXISTS projects(id INTEGER PRIMARY KEY AUTOINCREMENT,name TEXT NOT NULL,client TEXT DEFAULT '',hourly_rate_cents INTEGER DEFAULT 0,created_at DATETIME DEFAULT CURRENT_TIMESTAMP);CREATE TABLE IF NOT EXISTS entries(id INTEGER PRIMARY KEY AUTOINCREMENT,project_id INTEGER NOT NULL,description TEXT DEFAULT '',started_at TEXT NOT NULL,stopped_at TEXT DEFAULT '',duration_seconds INTEGER DEFAULT 0,running INTEGER DEFAULT 0,created_at DATETIME DEFAULT CURRENT_TIMESTAMP)`)}
-func(db *DB)CreateProject(p *Project)error{res,err:=db.Exec(`INSERT INTO projects(name,client,hourly_rate_cents)VALUES(?,?,?)`,p.Name,p.Client,p.HourlyRateCents);if err!=nil{return err};p.ID,_=res.LastInsertId();return nil}
-func(db *DB)ListProjects()([]Project,error){rows,_:=db.Query(`SELECT p.id,p.name,p.client,p.hourly_rate_cents,COALESCE(SUM(e.duration_seconds),0),p.created_at FROM projects p LEFT JOIN entries e ON e.project_id=p.id GROUP BY p.id ORDER BY p.name`);defer rows.Close();var out[]Project;for rows.Next(){var p Project;rows.Scan(&p.ID,&p.Name,&p.Client,&p.HourlyRateCents,&p.TotalSeconds,&p.CreatedAt);out=append(out,p)};return out,nil}
-func(db *DB)Start(projectID int64,desc string)(*Entry,error){res,err:=db.Exec(`INSERT INTO entries(project_id,description,started_at,running)VALUES(?,?,datetime('now'),1)`,projectID,desc);if err!=nil{return nil,err};id,_:=res.LastInsertId();return &Entry{ID:id,ProjectID:projectID,Description:desc,Running:true},nil}
-func(db *DB)Stop(id int64){db.Exec(`UPDATE entries SET stopped_at=datetime('now'),running=0,duration_seconds=CAST((julianday(datetime('now'))-julianday(started_at))*86400 AS INTEGER) WHERE id=?`,id)}
-func(db *DB)ListEntries(projectID int64)([]Entry,error){rows,_:=db.Query(`SELECT id,project_id,description,started_at,stopped_at,duration_seconds,running,created_at FROM entries WHERE project_id=? ORDER BY created_at DESC LIMIT 100`,projectID);defer rows.Close();var out[]Entry;for rows.Next(){var e Entry;var run int;rows.Scan(&e.ID,&e.ProjectID,&e.Description,&e.StartedAt,&e.StoppedAt,&e.DurationSeconds,&run,&e.CreatedAt);e.Running=run==1;out=append(out,e)};return out,nil}
-func(db *DB)Delete(id int64){db.Exec(`DELETE FROM projects WHERE id=?`,id)}
-func(db *DB)Stats()(map[string]interface{},error){var projects int;var hours int64;db.QueryRow(`SELECT COUNT(*) FROM projects`).Scan(&projects);db.QueryRow(`SELECT COALESCE(SUM(duration_seconds),0) FROM entries`).Scan(&hours);return map[string]interface{}{"projects":projects,"total_seconds":hours},nil}
+import ("database/sql";"fmt";"os";"path/filepath";"time";_ "modernc.org/sqlite")
+type DB struct{db *sql.DB}
+type Item struct{
+	ID string `json:"id"`
+	Name string `json:"name"`
+	Description string `json:"description"`
+	Status string `json:"status"`
+	Category string `json:"category"`
+	Tags string `json:"tags"`
+	CreatedAt string `json:"created_at"`
+}
+func Open(d string)(*DB,error){if err:=os.MkdirAll(d,0755);err!=nil{return nil,err};db,err:=sql.Open("sqlite",filepath.Join(d,"sundial.db")+"?_journal_mode=WAL&_busy_timeout=5000");if err!=nil{return nil,err}
+db.Exec(`CREATE TABLE IF NOT EXISTS items(id TEXT PRIMARY KEY,name TEXT NOT NULL,description TEXT DEFAULT '',status TEXT DEFAULT 'active',category TEXT DEFAULT '',tags TEXT DEFAULT '',created_at TEXT DEFAULT(datetime('now')))`)
+return &DB{db:db},nil}
+func(d *DB)Close()error{return d.db.Close()}
+func genID()string{return fmt.Sprintf("%d",time.Now().UnixNano())}
+func now()string{return time.Now().UTC().Format(time.RFC3339)}
+func(d *DB)Create(e *Item)error{e.ID=genID();e.CreatedAt=now();_,err:=d.db.Exec(`INSERT INTO items(id,name,description,status,category,tags,created_at)VALUES(?,?,?,?,?,?,?)`,e.ID,e.Name,e.Description,e.Status,e.Category,e.Tags,e.CreatedAt);return err}
+func(d *DB)Get(id string)*Item{var e Item;if d.db.QueryRow(`SELECT id,name,description,status,category,tags,created_at FROM items WHERE id=?`,id).Scan(&e.ID,&e.Name,&e.Description,&e.Status,&e.Category,&e.Tags,&e.CreatedAt)!=nil{return nil};return &e}
+func(d *DB)List()[]Item{rows,_:=d.db.Query(`SELECT id,name,description,status,category,tags,created_at FROM items ORDER BY created_at DESC`);if rows==nil{return nil};defer rows.Close();var o []Item;for rows.Next(){var e Item;rows.Scan(&e.ID,&e.Name,&e.Description,&e.Status,&e.Category,&e.Tags,&e.CreatedAt);o=append(o,e)};return o}
+func(d *DB)Delete(id string)error{_,err:=d.db.Exec(`DELETE FROM items WHERE id=?`,id);return err}
+func(d *DB)Count()int{var n int;d.db.QueryRow(`SELECT COUNT(*) FROM items`).Scan(&n);return n}
