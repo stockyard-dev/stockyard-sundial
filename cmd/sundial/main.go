@@ -40,7 +40,7 @@ func main() {
 	}
 	defer db.Close()
 
-	srv := server.New(db, server.DefaultLimits(), dataDir)
+	srv := server.New(db, server.DefaultLimits(dataDir), dataDir)
 
 	fmt.Printf("\n  Sundial v%s — Self-hosted time tracker\n", version)
 	fmt.Printf("  Dashboard:  http://localhost:%s/ui\n", port)
