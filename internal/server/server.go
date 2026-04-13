@@ -1,7 +1,9 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
@@ -67,6 +69,7 @@ func New(db *store.DB, limits Limits, dataDir string, b *bus.Bus) *Server {
 	// Tier — read-only license info for dashboard banner. Always reachable.
 	s.mux.HandleFunc("GET /api/tier", s.tierInfo)
 
+	s.subscribeBus()
 	return s
 }
 
@@ -397,4 +400,117 @@ func (s *Server) publishTimeLogged(e *store.TimeEntry) {
 			log.Printf("sundial: bus publish time.logged failed: %v", err)
 		}
 	}()
+}
+
+// subscribeBus wires cross-tool events to auto-logged time entries.
+// No-op when s.bus is nil (standalone mode).
+//
+// Allowlist-only (not SubscribeAll) so unexpected future topics can't
+// silently start creating time entries. Expanding this list is a
+// PR-reviewed change — every addition is "a new way time entries
+// appear without the user clicking New Entry."
+//
+// Idempotency: the appt:<id> marker is written to the entry's Tags
+// field and scanned on each fire. Bus cursor initializes at the
+// current high-water mark on Open (bus.go:199), so process restart
+// does NOT replay old events — we only dedup duplicate fires within
+// a single bundle lifetime.
+//
+// Handlers return nil on decode/data errors. The bus has no automatic
+// retry (bus.go Handler docstring).
+func (s *Server) subscribeBus() {
+	if s.bus == nil {
+		return
+	}
+	s.bus.Subscribe("appointment.completed", func(_ context.Context, e bus.Event) error {
+		return s.handleAppointmentCompleted(e)
+	})
+	log.Printf("sundial: subscribed to appointment.completed")
+}
+
+// handleAppointmentCompleted auto-logs a time entry when an
+// appointment transitions to completed.
+//
+// Shape decisions (see BUS-TOPICS.md):
+//   - Description = "Appointment: <service>" (or just "Appointment"
+//     if service is empty).
+//   - Project = client_name. Sundial's Project is free text, matches
+//     billfold's client_name field shape exactly, so the downstream
+//     time.logged → billfold line-item path naturally chains.
+//   - Task = service (free text from booking).
+//   - Duration = 3600 seconds (1 hour default). Booking's payload
+//     carries no duration concept; 1h is the least-bad default for a
+//     service appointment. User can edit in the sundial UI. This is
+//     the most opinionated default in the whole subscriber web and
+//     will likely get revisited once booking grows duration.
+//   - StartTime = "<date> <time>" concatenated from payload. Booking
+//     stores date/time as separate free-text strings with no timezone
+//     declared; we preserve that reality rather than fabricating
+//     RFC3339 precision.
+//   - EndTime = "" (can't compute without a real duration concept).
+//   - Billable = 1. Appointments are almost always billable work;
+//     user can flip it in the UI for the rare exception.
+//   - Tags = "appointment appt:<appointment_id>". The marker is what
+//     makes the handler idempotent.
+func (s *Server) handleAppointmentCompleted(e bus.Event) error {
+	var p map[string]any
+	if err := json.Unmarshal(e.Payload, &p); err != nil {
+		log.Printf("sundial: decode appointment.completed: %v", err)
+		return nil
+	}
+	apptID := stringField(p, "appointment_id")
+	if apptID == "" {
+		log.Printf("sundial: appointment.completed missing appointment_id, skipping")
+		return nil
+	}
+	marker := "appt:" + apptID
+	// Idempotency: scan existing entries for this marker in Tags.
+	for _, existing := range s.db.List() {
+		if strings.Contains(existing.Tags, marker) {
+			log.Printf("sundial: appointment %s already auto-logged as entry %s, skipping",
+				apptID, existing.ID)
+			return nil
+		}
+	}
+	service := strings.TrimSpace(stringField(p, "service"))
+	desc := "Appointment"
+	if service != "" {
+		desc = "Appointment: " + service
+	}
+	clientName := stringField(p, "client_name")
+	date := stringField(p, "date")
+	timeStr := stringField(p, "time")
+	startTime := strings.TrimSpace(date + " " + timeStr)
+	entry := store.TimeEntry{
+		Description: desc,
+		Project:     clientName,
+		Task:        service,
+		Duration:    3600,
+		StartTime:   startTime,
+		EndTime:     "",
+		Billable:    1,
+		Tags:        fmt.Sprintf("appointment %s", marker),
+	}
+	if err := s.db.Create(&entry); err != nil {
+		log.Printf("sundial: create time entry for appointment %s: %v", apptID, err)
+		return nil
+	}
+	log.Printf("sundial: auto-logged appointment %s as time entry %s (client=%q service=%q)",
+		apptID, entry.ID, clientName, service)
+	// NOTE: we deliberately do NOT call s.publishTimeLogged here. The
+	// downstream billfold subscriber keys on `project` = `client_name`
+	// which we DO set above — but firing time.logged from an
+	// appointment.completed handler creates a cross-tool chain
+	// (booking → sundial → billfold) that can surprise users. Leave
+	// re-publish opt-in via the sundial UI for now; revisit if the
+	// chained flow becomes explicitly desired.
+	return nil
+}
+
+// stringField returns m[k] as a string, or "" if absent / wrong type.
+func stringField(m map[string]any, k string) string {
+	if v, ok := m[k].(string); ok {
+		return v
+	}
+	return ""
 }
