@@ -6,9 +6,11 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"path/filepath"
 
 	"github.com/stockyard-dev/stockyard-sundial/internal/server"
 	"github.com/stockyard-dev/stockyard-sundial/internal/store"
+	"github.com/stockyard-dev/stockyard/bus"
 )
 
 var version = "dev"
@@ -40,7 +42,18 @@ func main() {
 	}
 	defer db.Close()
 
-	srv := server.New(db, server.DefaultLimits(dataDir), dataDir)
+	// Bus: one level up from the private data dir so every tool in a
+	// bundle shares one _bus.db. Non-fatal: sundial serves users with
+	// or without it.
+	var b *bus.Bus
+	if bb, berr := bus.Open(filepath.Dir(dataDir), "sundial"); berr != nil {
+		log.Printf("sundial: bus disabled: %v", berr)
+	} else {
+		b = bb
+		defer b.Close()
+	}
+
+	srv := server.New(db, server.DefaultLimits(dataDir), dataDir, b)
 
 	fmt.Printf("\n  Sundial v%s — Self-hosted time tracker\n", version)
 	fmt.Printf("  Dashboard:  http://localhost:%s/ui\n", port)

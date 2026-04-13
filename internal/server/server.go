@@ -11,6 +11,7 @@ import (
 	"sync"
 
 	"github.com/stockyard-dev/stockyard-sundial/internal/store"
+	"github.com/stockyard-dev/stockyard/bus"
 )
 
 // resourceName is the canonical key for extras storage and the API path.
@@ -23,14 +24,16 @@ type Server struct {
 	limits  Limits
 	dataDir string
 	pCfg    map[string]json.RawMessage
+	bus     *bus.Bus // optional cross-tool event bus; nil if not configured
 }
 
-func New(db *store.DB, limits Limits, dataDir string) *Server {
+func New(db *store.DB, limits Limits, dataDir string, b *bus.Bus) *Server {
 	s := &Server{
 		db:      db,
 		mux:     http.NewServeMux(),
 		limits:  limits,
 		dataDir: dataDir,
+		bus:     b,
 	}
 	s.loadPersonalConfig()
 
@@ -279,7 +282,9 @@ func (s *Server) create(w http.ResponseWriter, r *http.Request) {
 		we(w, 500, "create failed")
 		return
 	}
-	wj(w, 201, s.db.Get(e.ID))
+	created := s.db.Get(e.ID)
+	s.publishTimeLogged(created)
+	wj(w, 201, created)
 }
 
 func (s *Server) get(w http.ResponseWriter, r *http.Request) {
@@ -361,4 +366,35 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 
 func init() {
 	log.SetFlags(log.LstdFlags | log.Lshortfile)
+}
+
+// publishTimeLogged fires time.logged on the bus. No-op when bus is
+// nil (standalone). Runs in a goroutine; errors logged not surfaced.
+// Payload shape locked by docs/BUS-TOPICS.md v1 in stockyard-desktop.
+//
+// Reality note: sundial tracks time against Projects (free-text),
+// not Contacts. There is no contact_id in the payload. Subscribers
+// that want contact linkage must either (a) fuzzy-match project
+// name against a contact or (b) wait for sundial to grow a dossier
+// relation.
+func (s *Server) publishTimeLogged(e *store.TimeEntry) {
+	if s.bus == nil || e == nil {
+		return
+	}
+	payload := map[string]any{
+		"entry_id":         e.ID,
+		"description":      e.Description,
+		"project":          e.Project,
+		"task":             e.Task,
+		"duration_seconds": e.Duration,
+		"start_time":       e.StartTime,
+		"end_time":         e.EndTime,
+		"billable":         e.Billable == 1,
+		"tags":             e.Tags,
+	}
+	go func() {
+		if _, err := s.bus.Publish("time.logged", payload); err != nil {
+			log.Printf("sundial: bus publish time.logged failed: %v", err)
+		}
+	}()
 }
